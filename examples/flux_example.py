@@ -12,6 +12,22 @@ from xfuser.core.distributed import (
     is_dp_last_group,
 )
 
+def benchmark_torch_function(iters, f, *args, **kwargs):
+    f(*args, **kwargs)
+    f(*args, **kwargs)
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(iters):
+        f(*args, **kwargs)
+    end_event.record()
+    torch.cuda.synchronize()
+    # elapsed_time has a resolution of 0.5 microseconds:
+    # but returns milliseconds, so we need to multiply it to increase resolution
+    return start_event.elapsed_time(end_event) * 1000 / iters, f(*args, **kwargs)
+
+
 
 def main():
     parser = FlexibleArgumentParser(description="xFuser Arguments")
@@ -35,8 +51,10 @@ def main():
     pipe.prepare_run(input_config, max_sequence_length=256)
 
     torch.cuda.reset_peak_memory_stats()
-    start_time = time.time()
-    output = pipe(
+    # start_time = time.time()
+    avg_et, output = benchmark_torch_function(
+        10,
+        pipe,
         height=input_config.height,
         width=input_config.height,
         prompt=input_config.prompt,
@@ -46,8 +64,8 @@ def main():
         guidance_scale=0.0,
         generator=torch.Generator(device="cuda").manual_seed(input_config.seed),
     )
-    end_time = time.time()
-    elapsed_time = end_time - start_time
+    # end_time = time.time()
+    # elapsed_time = end_time - start_time
     peak_memory = torch.cuda.max_memory_allocated(device=f"cuda:{local_rank}")
 
     parallel_info = (
@@ -71,7 +89,7 @@ def main():
                 )
 
     if get_world_group().rank == get_world_group().world_size - 1:
-        print(f"epoch time: {elapsed_time:.2f} sec, memory: {peak_memory/1e9} GB")
+        print(f"epoch time: {avg_et / 1e6:.2f} sec, memory: {peak_memory/1e9} GB")
     get_runtime_state().destory_distributed_env()
 
 
